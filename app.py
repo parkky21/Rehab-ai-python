@@ -72,6 +72,7 @@ class App(ctk.CTk):
         self.cap = None
         self.detector = None
         self.current_exercise = EXERCISES[self.exercise_var.get()]
+        self.video_photo = None
         
         # Initialize MediaPipe config
         self.init_mediapipe()
@@ -116,7 +117,8 @@ class App(ctk.CTk):
             if self.cap:
                 self.cap.release()
             self.start_btn.configure(text="Start Analysis", fg_color=["#3B8ED0", "#1F6AA5"], hover_color=["#36719F", "#144870"])
-            self.vid_label.configure(image=None, text="Camera Feed Offline")
+            self.vid_label.configure(image="", text="Camera Feed Offline")
+            self.video_photo = None
 
     def update_frame(self):
         if not self.is_running:
@@ -185,12 +187,16 @@ class App(ctk.CTk):
                 pil_img.thumbnail((label_w, label_h))
             
             # Convert to PhotoImage for Tkinter
-            photo = PIL.ImageTk.PhotoImage(image=pil_img)
-            
-            # Update label
-            self.vid_label.configure(image=photo, text="")
-            # Keep a reference so it doesn't get garbage collected
-            self.vid_label.image = photo 
+            if self.video_photo is None:
+                self.video_photo = PIL.ImageTk.PhotoImage(image=pil_img)
+                self.vid_label.configure(image=self.video_photo, text="")
+            else:
+                # If sizes don't match perfectly, we must recreate
+                if self.video_photo.width() != pil_img.width or self.video_photo.height() != pil_img.height:
+                    self.video_photo = PIL.ImageTk.PhotoImage(image=pil_img)
+                    self.vid_label.configure(image=self.video_photo, text="")
+                else:
+                    self.video_photo.paste(pil_img)
 
         # Schedule next frame (delay of 15ms is ~60fps, use 30ms for ~30fps safely)
         if self.is_running:
