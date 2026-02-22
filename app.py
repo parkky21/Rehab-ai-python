@@ -5,6 +5,7 @@ import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 import numpy as np
+import numpy as np
 import time
 
 from exercises import EXERCISES
@@ -33,7 +34,8 @@ class App(ctk.CTk):
         self.subtitle_label.grid(row=1, column=0, padx=20, pady=10)
 
         # Exercise Selection Dropdown
-        self.exercise_var = ctk.StringVar(value="Bicep Curl (Left)")
+        # Start the default selection with the first exercise in the new dict
+        self.exercise_var = ctk.StringVar(value=list(EXERCISES.keys())[0])
         self.exercise_dropdown = ctk.CTkOptionMenu(
             self.sidebar_frame, 
             values=list(EXERCISES.keys()),
@@ -117,7 +119,7 @@ class App(ctk.CTk):
             if self.cap:
                 self.cap.release()
             self.start_btn.configure(text="Start Analysis", fg_color=["#3B8ED0", "#1F6AA5"], hover_color=["#36719F", "#144870"])
-            self.vid_label.configure(image="", text="Camera Feed Offline")
+            self.vid_label.configure(image=None, text="Camera Feed Offline")
             self.video_photo = None
 
     def update_frame(self):
@@ -185,18 +187,13 @@ class App(ctk.CTk):
             if label_w > 10 and label_h > 10:
                 # Maintain aspect ratio (e.g. 4:3 or 16:9)
                 pil_img.thumbnail((label_w, label_h))
-            
-            # Convert to PhotoImage for Tkinter
+            # Convert to CTkImage for CustomTkinter
             if self.video_photo is None:
-                self.video_photo = PIL.ImageTk.PhotoImage(image=pil_img)
-                self.vid_label.configure(image=self.video_photo, text="")
+                self.video_photo = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=pil_img.size)
             else:
-                # If sizes don't match perfectly, we must recreate
-                if self.video_photo.width() != pil_img.width or self.video_photo.height() != pil_img.height:
-                    self.video_photo = PIL.ImageTk.PhotoImage(image=pil_img)
-                    self.vid_label.configure(image=self.video_photo, text="")
-                else:
-                    self.video_photo.paste(pil_img)
+                self.video_photo.configure(light_image=pil_img, dark_image=pil_img, size=pil_img.size)
+                
+            self.vid_label.configure(image=self.video_photo, text="")
 
         # Schedule next frame (delay of 15ms is ~60fps, use 30ms for ~30fps safely)
         if self.is_running:
