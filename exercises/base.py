@@ -1,32 +1,78 @@
-import numpy as np
+"""
+Exercise Base Class
+Each exercise inherits from this and provides:
+- FSM rep detection logic
+- Exercise-specific scoring config (target ROM, ideal tempo, weights, etc.)
+- Feedback rules
+"""
 
-def calculate_angle(a, b, c):
-    """Calculate the angle between three points: a (first), b (mid), and c (end)."""
-    a = np.array([a.x, a.y])
-    b = np.array([b.x, b.y])
-    c = np.array([c.x, c.y])
-    
-    radians = np.arctan2(c[1]-b[1], c[0]-b[0]) - np.arctan2(a[1]-b[1], a[0]-b[0])
-    angle = np.abs(radians*180.0/np.pi)
-    
-    if angle > 180.0:
-        angle = 360.0 - angle
-        
-    return angle
+import numpy as np
+from pipeline.scorer import ExerciseConfig, RepScorer
+from pipeline.feature_engine import (
+    calculate_angle_2d,
+    ROMTracker,
+    TempoTracker,
+)
+
 
 class ExerciseBase:
+    """
+    Base class for all exercises.
+    Subclasses must implement:
+        - process(landmarks) -> (counter, stage, feedback, render_data)
+    And should set self.config to an ExerciseConfig instance.
+    """
+
     def __init__(self):
         self.counter = 0
         self.stage = None
         self.feedback = ""
-        # Default relevant landmarks (override in subclasses)
         self.relevant_landmarks = []
-        
+
+        # Scoring Config (override in subclasses)
+        self.config = ExerciseConfig()
+        self.scorer = RepScorer(self.config)
+
+        # Feature trackers
+        self.rom_tracker = ROMTracker()
+        self.tempo_tracker = TempoTracker()
+
+        # Latest rep scores
+        self.last_rep_scores = None
+        self.rep_completed = False  # Flag for the UI to detect new rep
+
     def reset(self):
         self.counter = 0
         self.stage = None
         self.feedback = ""
+        self.last_rep_scores = None
+        self.rep_completed = False
+        self.rom_tracker.reset()
+        self.tempo_tracker.reset()
+
+    def _on_rep_complete(self, sway: float = 0.0):
+        """
+        Called internally when a rep completes.
+        Computes scores for the completed rep.
+        """
+        rom = self.rom_tracker.complete_rep()
+        rep_time = self.tempo_tracker.complete_rep()
+
+        self.last_rep_scores = self.scorer.score_rep(
+            user_rom=rom,
+            sway=sway,
+            rep_time=rep_time,
+        )
+        self.rep_completed = True
+
+    def _on_rep_start(self):
+        """Called when a new rep movement begins."""
+        if self.tempo_tracker.rep_start_time is None:
+            self.tempo_tracker.start_rep()
 
     def process(self, landmarks):
-        """Processes landmarks for a single frame, updates counter/stage, returns (counter, stage, feedback, rendering_points)."""
+        """
+        Process landmarks for a single frame.
+        Returns (counter, stage, feedback, render_data).
+        """
         raise NotImplementedError("Subclasses must implement process()")
