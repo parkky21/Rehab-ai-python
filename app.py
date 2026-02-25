@@ -18,6 +18,7 @@ from pipeline import (
     ProgressionState,
     create_default_feedback_engine,
 )
+from pipeline.analytics import show_session_analytics
 
 
 class App(ctk.CTk):
@@ -241,6 +242,9 @@ class App(ctk.CTk):
                     self.engine_feedback_label.configure(
                         text=f"Progression: {prog['action'].upper()} — {prog['reason']}"
                     )
+
+                # Show analytics dashboard
+                show_session_analytics(self.session)
 
     def update_frame(self):
         if not self.is_running:

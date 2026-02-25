@@ -569,6 +569,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "customtkinter" },
+    { name = "matplotlib" },
     { name = "mediapipe" },
     { name = "numpy" },
     { name = "opencv-python" },
@@ -577,6 +578,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "customtkinter", specifier = ">=5.2.2" },
+    { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "mediapipe", specifier = ">=0.10.32" },
     { name = "numpy", specifier = ">=2.4.2" },
     { name = "opencv-python", specifier = ">=4.13.0.92" },
