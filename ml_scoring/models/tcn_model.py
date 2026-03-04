@@ -1,74 +1,67 @@
 """
-Temporal Convolutional Network (TCN) Exercise Rep Scorer
-=========================================================
-Uses stacked dilated causal 1-D convolutions with residual connections.
-Captures local and long-range temporal patterns without recurrence.
+TCN Exercise Rep Scorer (v2 — Improved)
+========================================
+Deeper TCN with more channels and squeeze-and-excitation attention.
 
 Architecture
 ------------
-  Input [B, T, F]  →  permute to [B, F, T]  (Conv1d convention)
-  → TCN Block (dilation=1,  channels=64)
-  → TCN Block (dilation=2,  channels=64)
-  → TCN Block (dilation=4,  channels=128)
-  → TCN Block (dilation=8,  channels=128)
-  → GlobalAvgPool over T  →  [B, 128]
-  → Linear(128) → GELU → dropout
+  Input [B, T, 12]  →  permute [B, 12, T]
+  → TCNBlock(d=1,  ch=96)
+  → TCNBlock(d=2,  ch=96)
+  → TCNBlock(d=4,  ch=128)
+  → TCNBlock(d=8,  ch=128)
+  → TCNBlock(d=16, ch=192)
+  → GlobalAvgPool + GlobalMaxPool concat → [B, 384]
+  → Linear(256) → GELU → dropout → Linear(128) → GELU
   → Linear(4)
-
-Each TCN Block:
-  Causal Conv1d → WeightNorm → GELU → dropout
-  Causal Conv1d → WeightNorm → GELU → dropout
-  + residual (1×1 conv if channels change)
 """
 
 import torch
 import torch.nn as nn
-from torch.nn.utils import weight_norm
+from torch.nn.utils import parametrizations
 
 
 class CausalConv1d(nn.Module):
-    """1-D convolution with left-side (causal) zero-padding."""
-
     def __init__(self, in_channels: int, out_channels: int, kernel_size: int, dilation: int):
         super().__init__()
         self.padding = (kernel_size - 1) * dilation
-        self.conv = weight_norm(
-            nn.Conv1d(
-                in_channels,
-                out_channels,
-                kernel_size,
-                dilation=dilation,
-                padding=self.padding,
-            )
+        conv = nn.Conv1d(
+            in_channels, out_channels, kernel_size,
+            dilation=dilation, padding=self.padding,
+        )
+        self.conv = parametrizations.weight_norm(conv)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = self.conv(x)
+        return out[:, :, :x.size(2)]
+
+
+class SqueezeExcite(nn.Module):
+    """Channel attention (SE block)."""
+    def __init__(self, channels: int, reduction: int = 4):
+        super().__init__()
+        self.fc = nn.Sequential(
+            nn.Linear(channels, channels // reduction),
+            nn.GELU(),
+            nn.Linear(channels // reduction, channels),
+            nn.Sigmoid(),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """x: [B, C, T]"""
-        out = self.conv(x)
-        # Remove the future-looking padding on the right
-        return out[:, :, : x.size(2)]
+        # x: [B, C, T]
+        s = x.mean(dim=2)           # [B, C]
+        s = self.fc(s).unsqueeze(2)  # [B, C, 1]
+        return x * s
 
 
 class TCNBlock(nn.Module):
-    """
-    Two-layer dilated causal residual block.
-
-    Parameters
-    ----------
-    in_channels : int
-    out_channels : int
-    kernel_size : int  (default 3)
-    dilation : int
-    dropout : float
-    """
-
     def __init__(
         self,
         in_channels: int,
         out_channels: int,
         kernel_size: int = 3,
         dilation: int = 1,
-        dropout: float = 0.2,
+        dropout: float = 0.15,
     ):
         super().__init__()
 
@@ -82,7 +75,8 @@ class TCNBlock(nn.Module):
         self.norm1 = nn.BatchNorm1d(out_channels)
         self.norm2 = nn.BatchNorm1d(out_channels)
 
-        # Residual projection if channel dimensions differ
+        self.se = SqueezeExcite(out_channels)
+
         self.residual = (
             nn.Conv1d(in_channels, out_channels, 1)
             if in_channels != out_channels
@@ -90,7 +84,6 @@ class TCNBlock(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """x: [B, in_channels, T]"""
         residual = self.residual(x)
 
         out = self.conv1(x)
@@ -103,90 +96,66 @@ class TCNBlock(nn.Module):
         out = self.act2(out)
         out = self.drop2(out)
 
+        out = self.se(out)  # Channel attention
+
         return out + residual
 
 
 class TCNScorer(nn.Module):
-    """
-    Temporal Convolutional Network with global average pooling and regression head.
-
-    Parameters
-    ----------
-    input_size : int
-        Number of input features per frame (default 7).
-    channels : list[int]
-        Output channels for each TCN block (len = num blocks).
-    kernel_size : int
-        Convolutional kernel size (default 3).
-    dropout : float
-        Dropout in TCN blocks (default 0.2).
-    num_scores : int
-        Number of regression outputs (default 4).
-    """
-
     def __init__(
         self,
-        input_size: int = 7,
+        input_size: int = 12,
         channels: list = None,
         kernel_size: int = 3,
-        dropout: float = 0.2,
+        dropout: float = 0.15,
         num_scores: int = 4,
     ):
         super().__init__()
 
         if channels is None:
-            channels = [64, 64, 128, 128]
+            channels = [96, 96, 128, 128, 192]
 
-        # Build TCN blocks with exponentially increasing dilation
         layers = []
         in_ch = input_size
         for i, out_ch in enumerate(channels):
             dilation = 2 ** i
             layers.append(
-                TCNBlock(
-                    in_channels=in_ch,
-                    out_channels=out_ch,
-                    kernel_size=kernel_size,
-                    dilation=dilation,
-                    dropout=dropout,
-                )
+                TCNBlock(in_ch, out_ch, kernel_size, dilation, dropout)
             )
             in_ch = out_ch
 
         self.tcn = nn.Sequential(*layers)
         final_channels = channels[-1]
 
+        # Dual pooling: avg + max
         self.head = nn.Sequential(
-            nn.Linear(final_channels, 128),
+            nn.Linear(final_channels * 2, 256),
             nn.GELU(),
             nn.Dropout(dropout * 0.5),
+            nn.Linear(256, 128),
+            nn.GELU(),
+            nn.Dropout(dropout * 0.3),
             nn.Linear(128, num_scores),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Parameters
-        ----------
-        x : Tensor [B, T, F]
+        x = x.permute(0, 2, 1)         # [B, F, T]
+        x = self.tcn(x)                 # [B, C, T]
 
-        Returns
-        -------
-        Tensor [B, num_scores]  — predicted scores in [0, 100]
-        """
-        x = x.permute(0, 2, 1)      # [B, F, T] for Conv1d
-        x = self.tcn(x)              # [B, C_last, T]
-        x = x.mean(dim=2)            # GlobalAvgPool → [B, C_last]
-        scores = self.head(x)
+        avg = x.mean(dim=2)             # [B, C]
+        mx  = x.max(dim=2).values       # [B, C]
+        pooled = torch.cat([avg, mx], dim=1)  # [B, 2*C]
+
+        scores = self.head(pooled)
         scores = torch.clamp(scores, 0.0, 100.0)
         return scores
 
 
-def build_tcn(input_size: int = 7, num_scores: int = 4) -> TCNScorer:
-    """Factory with default hyperparameters."""
+def build_tcn(input_size: int = 12, num_scores: int = 4) -> TCNScorer:
     return TCNScorer(
         input_size=input_size,
-        channels=[64, 64, 128, 128],
+        channels=[96, 96, 128, 128, 192],
         kernel_size=3,
-        dropout=0.2,
+        dropout=0.15,
         num_scores=num_scores,
     )

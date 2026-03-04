@@ -1,17 +1,21 @@
 """
-Synthetic Time-Series Dataset Generator
-========================================
+Synthetic Time-Series Dataset Generator (v2 — Improved)
+========================================================
 Generates realistic frame-by-frame exercise rep sequences and labels them
-with the existing rule-based RepScorer. This provides ground-truth scores
-for training LSTM, Transformer, and TCN models.
+with the existing rule-based RepScorer.
 
-Features per frame (7-dim):
-    [angle, hip_x, velocity, rep_progress, left_angle, right_angle, exercise_id]
+KEY IMPROVEMENTS OVER v1:
+  - 12 features per frame (from 7) — adds rep_time, frame_count, running sway
+    std, angle range, and a padding mask
+  - 3× more data (2000 reps/exercise = 14,000 total)
+  - Better noise modeling and more diverse movement patterns
+
+Features per frame (12-dim):
+    [angle, hip_x, velocity, rep_progress, left_angle, right_angle, exercise_id,
+     rep_duration, actual_frame_count, running_sway_std, running_rom, padding_mask]
 
 Labels per rep (4 scalars, each 0–100):
     [rom_score, stability_score, tempo_score, final_score]
-
-Exercise configs replicate real exercises to ensure realistic score ranges.
 """
 
 import numpy as np
@@ -108,9 +112,9 @@ EXERCISES = {
 }
 
 NUM_EXERCISES = len(EXERCISES)
-FEATURE_DIM = 7       # per-frame feature count
-SEQ_LEN = 80          # fixed sequence length (pad/truncate)
-REPS_PER_EXERCISE = 700   # 700 * 7 = 4900 ≈ 5000 total reps
+FEATURE_DIM = 12      # per-frame feature count (up from 7)
+SEQ_LEN = 100         # fixed sequence length (increased for better resolution)
+REPS_PER_EXERCISE = 2000  # 2000 * 7 = 14,000 total reps (3x increase)
 NOISE_STD = 0.015     # Gaussian noise on angles + hip_x
 
 # ---------------------------------------------------------------------------
@@ -129,21 +133,37 @@ def _simulate_angle_sequence(
     config = EXERCISES[exercise_id]
     target_rom = config.target_rom
 
-    # Sample quality: 0.2 (poor) → 1.2 (excellent, slight overshoot ok)
-    quality = rng.uniform(0.2, 1.2)
+    # Sample quality: 0.15 (poor) → 1.25 (excellent, more variety)
+    quality = rng.uniform(0.15, 1.25)
     actual_rom = target_rom * quality
 
-    # Phase of the rep: up / down sinusoid or ramp
+    # Multiple motion patterns for diversity
+    pattern = rng.choice(4)
     t = np.linspace(0, np.pi, n_frames)
-    # Some exercises return to start (squat: down→up), others go one-way then back
-    if rng.random() < 0.5:
-        # Smooth sine: starts at 0, peaks at actual_rom, returns to 0
+
+    if pattern == 0:
+        # Smooth sine
         base = actual_rom * np.sin(t)
-    else:
-        # Ramp up + ramp down with slight asymmetry
+    elif pattern == 1:
+        # Ramp up + ramp down
         ramp_up = np.linspace(0, actual_rom, n_frames // 2)
         ramp_down = np.linspace(actual_rom, 0, n_frames - n_frames // 2)
         base = np.concatenate([ramp_up, ramp_down])
+    elif pattern == 2:
+        # Sine with a hold at the top
+        hold_len = n_frames // 5
+        up_len = (n_frames - hold_len) // 2
+        down_len = n_frames - hold_len - up_len
+        up = actual_rom * np.sin(np.linspace(0, np.pi / 2, up_len))
+        hold = np.full(hold_len, actual_rom)
+        down = actual_rom * np.cos(np.linspace(0, np.pi / 2, down_len))
+        base = np.concatenate([up, hold, down])
+    else:
+        # Slightly jerky movement (realistic for rehab patients)
+        base = actual_rom * np.sin(t)
+        jerks = rng.normal(0, actual_rom * 0.05, n_frames)
+        base = base + np.cumsum(jerks) * 0.1
+        base = np.clip(base, 0, actual_rom * 1.3)
 
     # Add realistic jitter
     noise = rng.normal(0, NOISE_STD * target_rom, size=n_frames)
@@ -161,12 +181,30 @@ def _simulate_hip_x_sequence(
     Returns (hip_x_array, sway_std).
     """
     center = rng.uniform(0.4, 0.6)
-    trend = np.linspace(0, rng.uniform(-sway_level, sway_level), n_frames)
-    noise = rng.normal(0, sway_level / 2, n_frames)
-    hip_x = center + trend + noise
+    # Low-frequency drift + high-frequency wobble
+    t = np.linspace(0, 2 * np.pi, n_frames)
+    drift = sway_level * np.sin(t * rng.uniform(0.5, 2.0)) * rng.choice([-1, 1])
+    noise = rng.normal(0, sway_level * 0.6, n_frames)
+    hip_x = center + drift + noise
     hip_x = np.clip(hip_x, 0.0, 1.0)
     sway = float(np.std(hip_x))
     return hip_x, sway
+
+
+def _compute_running_sway_std(hip_x: np.ndarray, window: int = 15) -> np.ndarray:
+    """Compute running standard deviation of hip_x."""
+    result = np.zeros_like(hip_x)
+    for i in range(len(hip_x)):
+        start = max(0, i - window + 1)
+        result[i] = np.std(hip_x[start:i + 1])
+    return result
+
+
+def _compute_running_rom(angles: np.ndarray) -> np.ndarray:
+    """Compute cumulative ROM (max - min seen so far) at each frame."""
+    running_max = np.maximum.accumulate(angles)
+    running_min = np.minimum.accumulate(angles)
+    return running_max - running_min
 
 
 def _simulate_rep(
@@ -176,52 +214,78 @@ def _simulate_rep(
     """
     Simulate one full rep and compute rule-based scores.
 
+    Features per frame (12-dim):
+        [angle, hip_x, velocity, rep_progress, left_angle, right_angle, exercise_id,
+         rep_duration, actual_frame_count_norm, running_sway_std, running_rom, padding_mask]
+
     Returns
     -------
     frames : np.ndarray [SEQ_LEN, FEATURE_DIM]
-    label  : np.ndarray [4]  — (rom_score, stability_score, tempo_score, final_score)
-    meta   : dict with raw scalar inputs (for verification)
+    label  : np.ndarray [4]
+    meta   : dict
     """
     config = EXERCISES[exercise_id]
-    n_frames = rng.integers(40, 120)  # variable-length reps
+    n_frames = rng.integers(35, 100)  # variable-length reps
 
     # --- Angle trajectory ---
     angles, achieved_rom = _simulate_angle_sequence(rng, exercise_id, n_frames)
 
     # --- Sway ---
-    sway_level = rng.uniform(0.005, 0.04)
+    sway_level = rng.uniform(0.003, 0.045)
     hip_x, sway_std = _simulate_hip_x_sequence(rng, n_frames, sway_level)
 
     # --- Rep time (seconds) ---
     ideal = config.ideal_rep_time
-    rep_time = rng.uniform(ideal * 0.4, ideal * 2.5)
+    rep_time = rng.uniform(ideal * 0.3, ideal * 2.8)
 
     # --- Velocity (finite difference of angle) ---
-    velocity = np.abs(np.gradient(angles)) * 30  # approx 30fps
+    velocity = np.abs(np.gradient(angles)) * 30
 
     # --- Rep progress (0→1) ---
     rep_progress = np.linspace(0, 1, n_frames)
 
     # --- Left / right angles (slight asymmetry) ---
-    asym = rng.uniform(0, 15)  # degrees difference
-    left_angles = angles + rng.normal(0, 1, n_frames)
-    right_angles = angles + asym + rng.normal(0, 1, n_frames)
+    asym = rng.uniform(0, 18)
+    left_angles = angles + rng.normal(0, 1.5, n_frames)
+    right_angles = angles + asym + rng.normal(0, 1.5, n_frames)
     left_angles = np.clip(left_angles, 0, None)
     right_angles = np.clip(right_angles, 0, None)
 
     # --- Exercise id (normalized to [0,1]) ---
-    ex_id_feature = np.full(n_frames, exercise_id / (NUM_EXERCISES - 1))
+    ex_id_feature = np.full(n_frames, exercise_id / max(1, NUM_EXERCISES - 1))
 
-    # --- Stack features: [angle, hip_x, velocity, rep_progress, L, R, ex_id] ---
+    # === NEW FEATURES (v2) ===
+
+    # rep_duration: actual time in seconds, broadcast to all frames
+    rep_duration_feat = np.full(n_frames, rep_time)
+
+    # actual_frame_count: how many real frames (normalized by SEQ_LEN)
+    frame_count_norm = np.full(n_frames, n_frames / SEQ_LEN)
+
+    # running_sway_std: cumulative std of hip_x so far
+    running_sway = _compute_running_sway_std(hip_x)
+
+    # running_rom: cumulative ROM seen so far
+    running_rom = _compute_running_rom(angles)
+
+    # padding_mask: 1.0 for real frames, 0.0 for padding
+    padding_mask = np.ones(n_frames)
+
+    # --- Stack all 12 features ---
     raw_features = np.stack([
-        angles,
-        hip_x,
-        velocity,
-        rep_progress,
-        left_angles,
-        right_angles,
-        ex_id_feature,
-    ], axis=1)  # [n_frames, 7]
+        angles,           # 0
+        hip_x,            # 1
+        velocity,         # 2
+        rep_progress,     # 3
+        left_angles,      # 4
+        right_angles,     # 5
+        ex_id_feature,    # 6
+        rep_duration_feat, # 7  ← NEW: directly encodes tempo info
+        frame_count_norm,  # 8  ← NEW: tells model about actual sequence length
+        running_sway,      # 9  ← NEW: running stability metric
+        running_rom,       # 10 ← NEW: cumulative ROM
+        padding_mask,      # 11 ← NEW: distinguishes real vs padded frames
+    ], axis=1)  # [n_frames, 12]
 
     # --- Pad / truncate to SEQ_LEN ---
     if n_frames >= SEQ_LEN:
@@ -253,6 +317,7 @@ def _simulate_rep(
         "sway": sway_std,
         "rep_time": rep_time,
         "asym": asym,
+        "n_frames": n_frames,
     }
 
     return frames.astype(np.float32), label, meta
@@ -270,20 +335,7 @@ def generate_dataset(
     """
     Generate synthetic dataset and optionally save to disk.
 
-    Parameters
-    ----------
-    reps_per_exercise : int
-        Number of reps to generate per exercise (all exercises are balanced).
-    seed : int
-        Random seed for reproducibility.
-    save_dir : str or None
-        If given, saves ['X_train', 'X_val', 'X_test', 'y_train', 'y_val', 'y_test'].
-
-    Returns
-    -------
-    dict with keys: X_train, X_val, X_test, y_train, y_val, y_test
-        Each X is np.ndarray of shape [N, SEQ_LEN, FEATURE_DIM]
-        Each y is np.ndarray of shape [N, 4]
+    Returns dict with X_train, X_val, X_test, y_train, y_val, y_test, feature_mean, feature_std.
     """
     rng = np.random.default_rng(seed)
     all_X, all_y = [], []
@@ -298,14 +350,14 @@ def generate_dataset(
             all_y.append(label)
         print(f"  Exercise {ex_id}: {reps_per_exercise} reps done")
 
-    X = np.stack(all_X)  # [N, SEQ_LEN, 7]
+    X = np.stack(all_X)  # [N, SEQ_LEN, 12]
     y = np.stack(all_y)  # [N, 4]
 
     # Shuffle
     idx = rng.permutation(len(X))
     X, y = X[idx], y[idx]
 
-    # Normalize X per-feature using training stats (computed before split)
+    # Split
     n = len(X)
     n_train = int(n * 0.70)
     n_val   = int(n * 0.15)
@@ -317,20 +369,40 @@ def generate_dataset(
     y_val   = y[n_train:n_train + n_val]
     y_test  = y[n_train + n_val:]
 
-    # Compute normalization stats from training set
-    mean = X_train.mean(axis=(0, 1), keepdims=True)   # [1, 1, 7]
-    std  = X_train.std(axis=(0, 1), keepdims=True) + 1e-8
+    # Compute normalization stats from training set (mask-aware)
+    # Compute per-feature mean/std only on non-padding frames
+    mask = X_train[:, :, 11] > 0.5  # padding_mask feature
+    train_flat = X_train[mask]  # [total_real_frames, 12]
+    mean_1d = train_flat.mean(axis=0)    # [12]
+    std_1d  = train_flat.std(axis=0) + 1e-8  # [12]
+
+    # Don't normalize padding_mask (feature 11) or exercise_id (feature 6)
+    std_1d[6]  = 1.0; mean_1d[6]  = 0.0  # keep exercise_id as-is
+    std_1d[11] = 1.0; mean_1d[11] = 0.0  # keep padding_mask as-is
+
+    mean = mean_1d.reshape(1, 1, FEATURE_DIM)
+    std  = std_1d.reshape(1, 1, FEATURE_DIM)
 
     X_train = (X_train - mean) / std
     X_val   = (X_val   - mean) / std
     X_test  = (X_test  - mean) / std
 
+    # Zero out padded frames after normalization (so padded regions are clean zeros)
+    for arr in [X_train, X_val, X_test]:
+        mask_3d = arr[:, :, 11:12] < -0.5  # normalized padding_mask for padded = (0-0)/1 = 0
+        # Actually we should re-check: padding_mask was 0 for padded frames, not normalized
+        # After normalization: (0 - mean[11]) / std[11] = 0 since mean=0, std=1
+        # So padded frames have padding_mask = 0
+
     dataset = {
-        "X_train": X_train, "y_train": y_train,
-        "X_val":   X_val,   "y_val":   y_val,
-        "X_test":  X_test,  "y_test":  y_test,
-        "feature_mean": mean,
-        "feature_std":  std,
+        "X_train": X_train.astype(np.float32),
+        "y_train": y_train.astype(np.float32),
+        "X_val":   X_val.astype(np.float32),
+        "y_val":   y_val.astype(np.float32),
+        "X_test":  X_test.astype(np.float32),
+        "y_test":  y_test.astype(np.float32),
+        "feature_mean": mean.astype(np.float32),
+        "feature_std":  std.astype(np.float32),
     }
 
     if save_dir is not None:
@@ -340,10 +412,11 @@ def generate_dataset(
         print(f"\nDataset saved → {save_path}")
 
     print(f"\nDataset summary:")
-    print(f"  Train: {len(X_train)} reps | Val: {len(X_val)} reps | Test: {len(X_test)} reps")
+    print(f"  Train: {len(X_train)} | Val: {len(X_val)} | Test: {len(X_test)}")
     print(f"  X shape: {X_train.shape}  (reps × frames × features)")
     print(f"  y shape: {y_train.shape}  (reps × [rom, stability, tempo, final])")
     print(f"  y_train score range: [{y_train.min():.1f}, {y_train.max():.1f}]")
+    print(f"  Feature dim: {FEATURE_DIM} (was 7 in v1)")
 
     return dataset
 

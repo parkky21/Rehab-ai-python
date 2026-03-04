@@ -212,16 +212,17 @@ def plot_comparison(results: dict, y_true: np.ndarray):
     if os.path.exists(hist_path):
         hist = np.load(hist_path)
         for name in ["lstm", "transformer", "tcn"]:
-            key_val = f"{name}_val"
+            key_val = f"{name}_val_loss"
             if key_val in hist:
-                epochs = range(1, len(hist[key_val]) + 1)
-                ax.plot(epochs, hist[key_val], label=name.upper(),
-                        color=colors.get(name.capitalize(), "#7f8c8d"))
+                val_losses = hist[key_val]
+                epochs = range(1, len(val_losses) + 1)
+                ax.plot(epochs, val_losses, label=name.upper(),
+                        color=colors.get(name.capitalize(), "#7f8c8d") if name != "transformer" else colors.get("Transformer", "#7f8c8d"), linewidth=1.5)
         ax.set_xlabel("Epoch")
-        ax.set_ylabel("Val MSE Loss")
+        ax.set_ylabel("Val Huber Loss (SmoothL1)")
         ax.set_title("Validation Loss During Training")
         ax.legend()
-        ax.grid(alpha=0.2)
+        ax.grid(alpha=0.3)
     else:
         ax.text(0.5, 0.5, "No training history found.\nRun train.py first.",
                 ha="center", va="center", transform=ax.transAxes)
