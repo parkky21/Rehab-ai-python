@@ -206,9 +206,38 @@ class MLRepScorer:
                 "final_score": 0.0,
             }
 
-        # Build sequence array
-        frames = np.stack(self._frame_buffer)  # [T, 7]
-        n = len(frames)
+        # Build sequence array (first 7 features)
+        raw_frames = np.stack(self._frame_buffer)  # [T, 7]
+        n = len(raw_frames)
+
+        angles = raw_frames[:, 0]
+        hip_xs = raw_frames[:, 1]
+
+        # Compute running sway std
+        running_sway = np.zeros(n, dtype=np.float32)
+        for i in range(n):
+            start = max(0, i - 15 + 1)
+            running_sway[i] = np.std(hip_xs[start:i + 1])
+
+        # Compute running ROM
+        running_max = np.maximum.accumulate(angles)
+        running_min = np.minimum.accumulate(angles)
+        running_rom = running_max - running_min
+
+        # Generate the new v2 features
+        rep_duration_feat = np.full(n, rep_time if rep_time else 0.0, dtype=np.float32)
+        frame_count_norm  = np.full(n, n / SEQ_LEN, dtype=np.float32)
+        padding_mask      = np.ones(n, dtype=np.float32)
+
+        # Stack into 12-dim frames
+        frames = np.column_stack([
+            raw_frames,           # 0-6
+            rep_duration_feat,    # 7
+            frame_count_norm,     # 8
+            running_sway,         # 9
+            running_rom,          # 10
+            padding_mask,         # 11
+        ])
 
         # Pad or truncate to SEQ_LEN
         if n >= SEQ_LEN:
