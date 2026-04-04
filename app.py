@@ -103,8 +103,8 @@ class App(ctk.CTk):
         self.score_title.pack(pady=(8, 2))
 
         self.final_score_label = ctk.CTkLabel(
-            self.score_frame, text="Final: --",
-            font=ctk.CTkFont(size=18, weight="bold"),
+            self.score_frame, text="Rule: -- | ML: --",
+            font=ctk.CTkFont(size=14, weight="bold"),
             text_color="#2ECC71",
         )
         self.final_score_label.pack(pady=2)
@@ -278,6 +278,10 @@ class App(ctk.CTk):
                     # Pipeline Step 3: Exercise FSM processing
                     counter, stage, feedback, render_data = self.current_exercise.process(smoothed)
 
+                    # Pipeline Step 3.5: Feed frame to ML scorers
+                    if render_data.get("angle", 0) != 0:
+                        self.current_exercise.record_ml_frame(render_data["angle"], smoothed)
+
                     # Pipeline Step 4: Feedback engine evaluation
                     context = {
                         "sway": current_sway,
@@ -299,7 +303,9 @@ class App(ctk.CTk):
                         )
 
                         # Update score UI
-                        self.final_score_label.configure(text=f"Final: {scores['final_score']}")
+                        lstm_score = scores.get("lstm_final", "--")
+                        trans_score = scores.get("transformer_final", "--")
+                        self.final_score_label.configure(text=f"Rule: {scores['final_score']} | LSTM: {lstm_score} | TF: {trans_score}")
                         self.rom_score_label.configure(text=f"ROM: {scores['rom_score']}")
                         self.stability_score_label.configure(text=f"Stability: {scores['stability_score']}")
                         self.tempo_score_label.configure(text=f"Tempo: {scores['tempo_score']}")
@@ -339,11 +345,14 @@ class App(ctk.CTk):
 
                     # Draw score overlay on video feed
                     if self.current_exercise.last_rep_scores:
-                        score_text = f"Score: {self.current_exercise.last_rep_scores['final_score']}"
-                        cv2.putText(
-                            annotated_image, score_text, (w - 200, 30),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2, cv2.LINE_AA,
-                        )
+                        scores = self.current_exercise.last_rep_scores
+                        score_text = f"Rule: {scores['final_score']}"
+                        lstm_text  = f"LSTM: {scores.get('lstm_final', '--')}"
+                        trans_text = f"TF:   {scores.get('transformer_final', '--')}"
+                        
+                        cv2.putText(annotated_image, score_text, (w - 200, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2, cv2.LINE_AA)
+                        cv2.putText(annotated_image, lstm_text,  (w - 200, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 200, 0), 2, cv2.LINE_AA)
+                        cv2.putText(annotated_image, trans_text, (w - 200, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 200, 255), 2, cv2.LINE_AA)
 
             except Exception as e:
                 pass
