@@ -7,8 +7,8 @@ This repository now contains two runtime modes:
 
 ## Run API Locally
 
-1. Create `.env` in the repository root from `.env.example`.
-2. Start MongoDB and API from the repo root:
+1. Create `.env` in `python-server` from `.env.example`.
+2. Start MongoDB and API from the `python-server` folder:
 
 ```bash
 docker compose up --build
@@ -24,13 +24,25 @@ http://localhost:8000/docs
 
 - `POST /api/v1/auth/register` Doctor or Patient registration
 - `POST /api/v1/auth/login` Login and token issuance
+- `POST /api/v1/auth/refresh` Refresh access token
 - `GET /api/v1/auth/me` Current profile
 - `GET /api/v1/exercises` Exercise catalog from current scoring configs
+- `GET /api/v1/doctor/patients` Doctor linked patient list
 - `POST /api/v1/doctor/patients/link` Link patient to doctor
 - `POST /api/v1/doctor/assignments` Assign exercise to linked patient
+- `GET /api/v1/doctor/patients/{patient_id}/report` Doctor progress report
 - `GET /api/v1/patient/assignments` Patient assignment queue
 - `GET /api/v1/patient/sessions` Patient session history
+- `GET /api/v1/patient/progress` Patient trend and adherence summary
 - `WS /api/v1/ws/session?token=<JWT>&assignment_id=<id>` Real-time landmark stream and feedback
+
+## Seed Demo Users
+
+With API and Mongo running, create demo users and baseline assignments:
+
+```bash
+uv run python -m api_server.seed_demo
+```
 
 ## WebSocket Frame Message
 

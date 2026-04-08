@@ -11,6 +11,29 @@ from api_server.utils import serialize_doc, to_object_id, utc_now
 router = APIRouter(prefix="/doctor", tags=["doctor"])
 
 
+def _trend_label(values: list[float]) -> str:
+    if len(values) < 2:
+        return "insufficient_data"
+    delta = values[-1] - values[0]
+    if delta > 3.0:
+        return "improving"
+    if delta < -3.0:
+        return "declining"
+    return "stable"
+
+
+async def _assert_linked(db: AsyncIOMotorDatabase, doctor_id: str, patient_id: ObjectId) -> None:
+    linked = await db.doctor_patient_links.find_one(
+        {
+            "doctor_id": ObjectId(doctor_id),
+            "patient_id": patient_id,
+            "status": "active",
+        }
+    )
+    if not linked:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Patient is not linked to this doctor")
+
+
 @router.post("/patients/link")
 async def link_patient(
     payload: PatientLinkRequest,
@@ -48,15 +71,7 @@ async def create_assignment(
 
     patient_id = to_object_id(payload.patient_id, "patient_id")
 
-    linked = await db.doctor_patient_links.find_one(
-        {
-            "doctor_id": ObjectId(doctor["id"]),
-            "patient_id": patient_id,
-            "status": "active",
-        }
-    )
-    if not linked:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Patient is not linked to this doctor")
+    await _assert_linked(db, doctor["id"], patient_id)
 
     assignment_doc = {
         "doctor_id": ObjectId(doctor["id"]),
@@ -81,16 +96,67 @@ async def get_patient_sessions(
 ) -> dict:
     pid = to_object_id(patient_id, "patient_id")
 
-    linked = await db.doctor_patient_links.find_one(
-        {
-            "doctor_id": ObjectId(doctor["id"]),
-            "patient_id": pid,
-            "status": "active",
-        }
-    )
-    if not linked:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Patient is not linked to this doctor")
+    await _assert_linked(db, doctor["id"], pid)
 
     cursor = db.sessions.find({"patient_id": pid}).sort("started_at", -1).limit(100)
     sessions = [serialize_doc(doc) async for doc in cursor]
     return {"sessions": sessions}
+
+
+@router.get("/patients")
+async def get_linked_patients(
+    doctor: dict = Depends(require_role({"doctor"})),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+) -> dict:
+    links = db.doctor_patient_links.find({"doctor_id": ObjectId(doctor["id"]), "status": "active"})
+
+    patients: list[dict] = []
+    async for link in links:
+        patient_doc = await db.users.find_one({"_id": link["patient_id"], "role": "patient"})
+        if not patient_doc:
+            continue
+        patients.append(serialize_doc(patient_doc))
+    return {"patients": patients}
+
+
+@router.get("/patients/{patient_id}/report")
+async def get_patient_report(
+    patient_id: str,
+    exercise_name: str | None = None,
+    doctor: dict = Depends(require_role({"doctor"})),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+) -> dict:
+    pid = to_object_id(patient_id, "patient_id")
+    await _assert_linked(db, doctor["id"], pid)
+
+    session_filter: dict = {"patient_id": pid, "doctor_id": ObjectId(doctor["id"]), "status": "completed"}
+    if exercise_name:
+        session_filter["exercise_name"] = exercise_name
+
+    sessions = [serialize_doc(doc) async for doc in db.sessions.find(session_filter).sort("started_at", 1)]
+    scores = [float((session.get("summary") or {}).get("avg_final_score", 0.0)) for session in sessions]
+    avg_score = round(sum(scores) / len(scores), 1) if scores else 0.0
+
+    assignment_filter: dict = {"doctor_id": ObjectId(doctor["id"]), "patient_id": pid}
+    if exercise_name:
+        assignment_filter["exercise_name"] = exercise_name
+    total_assignments = await db.exercise_assignments.count_documents(assignment_filter)
+    completed_assignments = await db.exercise_assignments.count_documents({**assignment_filter, "status": "completed"})
+    adherence = round((completed_assignments / total_assignments) * 100.0, 1) if total_assignments else 0.0
+
+    progression_filter: dict = {"patient_id": pid}
+    if exercise_name:
+        progression_filter["exercise_name"] = exercise_name
+    latest_snapshot = await db.progression_snapshots.find_one(progression_filter, sort=[("snapshot_at", -1)])
+
+    return {
+        "patient_id": patient_id,
+        "exercise_name": exercise_name,
+        "session_count": len(sessions),
+        "avg_final_score": avg_score,
+        "trend": _trend_label(scores[-5:]),
+        "adherence_percent": adherence,
+        "recent_scores": scores[-10:],
+        "latest_progression": serialize_doc(latest_snapshot),
+        "recent_sessions": sessions[-10:],
+    }

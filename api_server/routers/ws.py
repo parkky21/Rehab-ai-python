@@ -8,6 +8,7 @@ from api_server.runtime import RealtimeSessionRuntime
 from api_server.schemas import RealtimeFrameMessage
 from api_server.security import TokenError, decode_token
 from api_server.utils import utc_now
+from pipeline.progression import ProgressionState
 
 router = APIRouter(tags=["realtime"])
 
@@ -160,4 +161,36 @@ async def session_websocket(websocket: WebSocket) -> None:
         await db.exercise_assignments.update_one(
             {"_id": assignment["_id"]},
             {"$set": {"status": "completed", "updated_at": utc_now()}},
+        )
+
+        score_docs = db.sessions.find(
+            {
+                "patient_id": assignment["patient_id"],
+                "exercise_name": assignment["exercise_name"],
+                "status": "completed",
+            },
+            {"summary.avg_final_score": 1},
+        ).sort("started_at", -1).limit(5)
+
+        recent_scores: list[float] = []
+        async for score_doc in score_docs:
+            recent_scores.append(float(score_doc.get("summary", {}).get("avg_final_score", 0.0)))
+
+        progression = ProgressionState()
+        progression.session_scores = list(reversed(recent_scores))
+        progression_decision = progression.compute_progression()
+
+        await db.progression_snapshots.insert_one(
+            {
+                "patient_id": assignment["patient_id"],
+                "doctor_id": assignment["doctor_id"],
+                "exercise_name": assignment["exercise_name"],
+                "latest_score": float(summary.get("avg_final_score", 0.0)),
+                "recent_scores": progression.session_scores,
+                "target_reps": progression.target_reps,
+                "target_rom_multiplier": progression.target_rom_multiplier,
+                "sway_tolerance_multiplier": progression.sway_tolerance_multiplier,
+                "decision": progression_decision,
+                "snapshot_at": utc_now(),
+            }
         )
