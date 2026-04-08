@@ -49,8 +49,13 @@ async def session_websocket(websocket: WebSocket) -> None:
         return
 
     user = await _authenticate_websocket(token, db)
-    if not user or user["role"] != "patient":
-        await websocket.send_json({"type": "error", "detail": "Unauthorized"})
+    if not user:
+        await websocket.send_json({"type": "error", "detail": "Invalid or expired token. Please sign in again."})
+        await websocket.close(code=1008)
+        return
+
+    if user["role"] != "patient":
+        await websocket.send_json({"type": "error", "detail": "Only patient accounts can open sessions."})
         await websocket.close(code=1008)
         return
 
@@ -62,7 +67,12 @@ async def session_websocket(websocket: WebSocket) -> None:
         }
     )
     if not assignment:
-        await websocket.send_json({"type": "error", "detail": "Assignment not found"})
+        await websocket.send_json(
+            {
+                "type": "error",
+                "detail": "Assignment not found or not active for this patient.",
+            }
+        )
         await websocket.close(code=1008)
         return
 

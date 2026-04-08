@@ -21,5 +21,18 @@ services:
     depends_on:
       - mongodb
 
+  web:
+    build:
+      context: ../web-client
+      dockerfile: Dockerfile
+    container_name: rehab-web
+    restart: unless-stopped
+    env_file:
+      - ../web-client/.env
+    ports:
+      - "5173:5173"
+    depends_on:
+      - api
+
 volumes:
   mongo_data:

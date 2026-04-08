@@ -5,10 +5,11 @@ This repository now contains two runtime modes:
 - Desktop prototype: `app.py` (existing CustomTkinter flow)
 - Production backend API: `api_server.main:app` (FastAPI + MongoDB + WebSocket)
 
-## Run API Locally
+## Run Full Stack Locally
 
 1. Create `.env` in `python-server` from `.env.example`.
-2. Start MongoDB and API from the `python-server` folder:
+2. Create `.env` in `web-client` from `web-client/.env.example`.
+3. Start MongoDB, API, and web client from the `python-server` folder:
 
 ```bash
 docker compose up --build
@@ -18,6 +19,12 @@ docker compose up --build
 
 ```text
 http://localhost:8000/docs
+```
+
+4. Open web app:
+
+```text
+http://localhost:5173
 ```
 
 ## API Overview

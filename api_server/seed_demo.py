@@ -18,9 +18,13 @@ async def seed() -> None:
         raise RuntimeError("MongoDB not connected")
 
     doctor_email = "doctor.demo@rehabai.local"
-    patient_emails = [
-        "patient.one@rehabai.local",
-        "patient.two@rehabai.local",
+    patients = [
+        {"name": "Aarav Pathak", "email": "pathak@rehabai.local", "username": "pathak"},
+        {"name": "Neha Kapoor", "email": "neha.k@rehabai.local", "username": "neha_k"},
+        {"name": "Rohan Mehta", "email": "rohan.m@rehabai.local", "username": "rohan_m"},
+        {"name": "Priya Sharma", "email": "priya.s@rehabai.local", "username": "priya_s"},
+        {"name": "Vikram Rao", "email": "vikram.r@rehabai.local", "username": "vikram_r"},
+        {"name": "Ananya Iyer", "email": "ananya.i@rehabai.local", "username": "ananya_i"},
     ]
 
     doctor_doc = await db.users.find_one({"email": doctor_email})
@@ -43,15 +47,25 @@ async def seed() -> None:
         raise RuntimeError("Doctor seed failed")
 
     patient_ids: list[ObjectId] = []
-    for idx, email in enumerate(patient_emails, start=1):
-        patient_doc = await db.users.find_one({"email": email})
+    for idx, patient in enumerate(patients, start=1):
+        patient_doc = await db.users.find_one(
+            {
+                "role": "patient",
+                "$or": [
+                    {"email": patient["email"]},
+                    {"username": patient["username"]},
+                ],
+            }
+        )
+        patient_hash = hash_password("12345678")
+
         if not patient_doc:
             result = await db.users.insert_one(
                 {
-                    "name": f"Patient {idx}",
-                    "email": email,
-                    "username": f"patient_{idx}",
-                    "password_hash": hash_password("Patient@123"),
+                    "name": patient["name"],
+                    "email": patient["email"],
+                    "username": patient["username"],
+                    "password_hash": patient_hash,
                     "role": "patient",
                     "created_at": utc_now(),
                 }
@@ -59,6 +73,16 @@ async def seed() -> None:
             patient_id = result.inserted_id
         else:
             patient_id = _doc_id(patient_doc)
+            await db.users.update_one(
+                {"_id": patient_id},
+                {
+                    "$set": {
+                        "name": patient["name"],
+                        "username": patient["username"],
+                        "password_hash": patient_hash,
+                    }
+                },
+            )
 
         if patient_id is None:
             continue
@@ -77,31 +101,38 @@ async def seed() -> None:
             upsert=True,
         )
 
-        await db.exercise_assignments.update_one(
-            {
-                "doctor_id": doctor_id,
-                "patient_id": patient_id,
-                "exercise_name": "Squats",
-                "status": {"$in": ["assigned", "in_progress"]},
-            },
-            {
-                "$setOnInsert": {
+        assignment_templates = [
+            {"exercise_name": "Squats", "target_reps": 10, "status": "assigned"},
+            {"exercise_name": "Heel Raises", "target_reps": 12, "status": "in_progress"},
+            {"exercise_name": "Marching", "target_reps": 14, "status": "completed"},
+        ]
+
+        for template in assignment_templates:
+            await db.exercise_assignments.update_one(
+                {
                     "doctor_id": doctor_id,
                     "patient_id": patient_id,
-                    "exercise_name": "Squats",
-                    "target_reps": 10,
-                    "status": "assigned",
-                    "notes": "Demo assignment",
-                    "created_at": utc_now(),
-                }
-            },
-            upsert=True,
-        )
+                    "exercise_name": template["exercise_name"],
+                    "status": template["status"],
+                },
+                {
+                    "$setOnInsert": {
+                        "doctor_id": doctor_id,
+                        "patient_id": patient_id,
+                        "exercise_name": template["exercise_name"],
+                        "target_reps": template["target_reps"],
+                        "status": template["status"],
+                        "notes": "Demo assignment",
+                        "created_at": utc_now(),
+                        "updated_at": utc_now(),
+                    }
+                },
+                upsert=True,
+            )
 
     print("Seed complete")
     print("Doctor login: doctor.demo@rehabai.local / Doctor@123")
-    print("Patient login: patient.one@rehabai.local / Patient@123")
-    print("Patient login: patient.two@rehabai.local / Patient@123")
+    print("All seeded patient passwords: 12345678")
 
     await mongo.close()
 

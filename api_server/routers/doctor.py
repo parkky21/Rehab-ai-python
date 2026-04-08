@@ -5,10 +5,27 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from api_server.database import get_db
 from api_server.deps import require_role
 from api_server.exercise_factory import list_exercises
-from api_server.schemas import AssignmentCreateRequest, AssignmentResponse, PatientLinkRequest
+from api_server.schemas import (
+    AssignmentCreateRequest,
+    AssignmentResponse,
+    PatientAssignmentStats,
+    PatientLinkRequest,
+    UserProfile,
+)
 from api_server.utils import serialize_doc, to_object_id, utc_now
 
 router = APIRouter(prefix="/doctor", tags=["doctor"])
+
+
+def _public_patient(patient_doc: dict) -> dict:
+    return {
+        "id": str(patient_doc["_id"]),
+        "name": patient_doc.get("name"),
+        "email": patient_doc.get("email"),
+        "username": patient_doc.get("username"),
+        "role": patient_doc.get("role"),
+        "created_at": patient_doc.get("created_at"),
+    }
 
 
 def _trend_label(values: list[float]) -> str:
@@ -40,10 +57,29 @@ async def link_patient(
     doctor: dict = Depends(require_role({"doctor"})),
     db: AsyncIOMotorDatabase = Depends(get_db),
 ) -> dict:
-    patient_id = to_object_id(payload.patient_id, "patient_id")
-    patient_doc = await db.users.find_one({"_id": patient_id, "role": "patient"})
+    patient_doc = None
+
+    if payload.patient_id:
+        patient_id = to_object_id(payload.patient_id, "patient_id")
+        patient_doc = await db.users.find_one({"_id": patient_id, "role": "patient"})
+    elif payload.patient_email:
+        patient_doc = await db.users.find_one(
+            {"email": payload.patient_email.strip().lower(), "role": "patient"}
+        )
+    elif payload.patient_username:
+        patient_doc = await db.users.find_one(
+            {"username": payload.patient_username.strip().lower(), "role": "patient"}
+        )
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Provide one of patient_id, patient_email, or patient_username",
+        )
+
     if not patient_doc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Patient not found")
+
+    patient_id = patient_doc["_id"]
 
     link_doc = {
         "doctor_id": ObjectId(doctor["id"]),
@@ -57,7 +93,12 @@ async def link_patient(
         upsert=True,
     )
 
-    return {"status": "linked", "patient_id": payload.patient_id}
+    return {
+        "status": "linked",
+        "patient_id": str(patient_id),
+        "patient_email": patient_doc.get("email"),
+        "patient_username": patient_doc.get("username"),
+    }
 
 
 @router.post("/assignments", response_model=AssignmentResponse)
@@ -115,8 +156,125 @@ async def get_linked_patients(
         patient_doc = await db.users.find_one({"_id": link["patient_id"], "role": "patient"})
         if not patient_doc:
             continue
-        patients.append(serialize_doc(patient_doc))
+        patients.append(_public_patient(patient_doc))
     return {"patients": patients}
+
+
+@router.get("/patients/search")
+async def search_patients(
+    q: str,
+    doctor: dict = Depends(require_role({"doctor"})),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+) -> dict:
+    query = q.strip().lower()
+    if len(query) < 2:
+        return {"patients": []}
+
+    links = db.doctor_patient_links.find({"doctor_id": ObjectId(doctor["id"]), "status": "active"})
+    linked_ids: set[str] = set()
+    async for link in links:
+        linked_ids.add(str(link["patient_id"]))
+
+    search_filter = {
+        "role": "patient",
+        "$or": [
+            {"name": {"$regex": query, "$options": "i"}},
+            {"email": {"$regex": query, "$options": "i"}},
+            {"username": {"$regex": query, "$options": "i"}},
+        ],
+    }
+
+    cursor = db.users.find(search_filter).sort("created_at", -1).limit(10)
+    patients: list[dict] = []
+    async for doc in cursor:
+        serialized = _public_patient(doc)
+        serialized["linked"] = serialized["id"] in linked_ids
+        patients.append(serialized)
+
+    return {"patients": patients}
+
+
+@router.get("/patients/assignment-stats")
+async def get_patient_assignment_stats(
+    q: str | None = None,
+    doctor: dict = Depends(require_role({"doctor"})),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+) -> dict:
+    links_cursor = db.doctor_patient_links.find({"doctor_id": ObjectId(doctor["id"]), "status": "active"})
+    linked_ids: list[ObjectId] = []
+    async for link in links_cursor:
+        linked_ids.append(link["patient_id"])
+
+    if not linked_ids:
+        return {"stats": []}
+
+    patient_filter: dict = {"_id": {"$in": linked_ids}, "role": "patient"}
+    query = (q or "").strip()
+    if query:
+        patient_filter["$or"] = [
+            {"name": {"$regex": query, "$options": "i"}},
+            {"email": {"$regex": query, "$options": "i"}},
+            {"username": {"$regex": query, "$options": "i"}},
+        ]
+
+    patient_docs = [doc async for doc in db.users.find(patient_filter)]
+    if not patient_docs:
+        return {"stats": []}
+
+    patient_map: dict[str, dict] = {}
+    patient_ids: list[ObjectId] = []
+    for doc in patient_docs:
+        public = _public_patient(doc)
+        patient_map[public["id"]] = public
+        patient_ids.append(doc["_id"])
+
+    counts_map: dict[str, dict[str, int]] = {
+        patient_id: {"assigned": 0, "in_progress": 0, "completed": 0, "total": 0}
+        for patient_id in patient_map
+    }
+
+    counts_cursor = db.exercise_assignments.aggregate(
+        [
+            {
+                "$match": {
+                    "doctor_id": ObjectId(doctor["id"]),
+                    "patient_id": {"$in": patient_ids},
+                }
+            },
+            {
+                "$group": {
+                    "_id": {"patient_id": "$patient_id", "status": "$status"},
+                    "count": {"$sum": 1},
+                }
+            },
+        ]
+    )
+
+    async for row in counts_cursor:
+        patient_id_str = str(row["_id"]["patient_id"])
+        status = row["_id"].get("status")
+        count = int(row.get("count", 0))
+        if patient_id_str not in counts_map:
+            continue
+        counts_map[patient_id_str]["total"] += count
+        if status in {"assigned", "in_progress", "completed"}:
+            counts_map[patient_id_str][status] += count
+
+    stats: list[PatientAssignmentStats] = []
+    for patient_id, public_patient in patient_map.items():
+        counts = counts_map[patient_id]
+        stats.append(
+            PatientAssignmentStats(
+                patient=UserProfile(**public_patient),
+                assigned_count=counts["assigned"],
+                in_progress_count=counts["in_progress"],
+                completed_count=counts["completed"],
+                total_count=counts["total"],
+            )
+        )
+
+    stats.sort(key=lambda item: item.patient.name.lower())
+    return {"stats": [item.model_dump() for item in stats]}
 
 
 @router.get("/patients/{patient_id}/report")

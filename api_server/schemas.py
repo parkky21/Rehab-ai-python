@@ -39,8 +39,18 @@ class UserProfile(BaseModel):
     created_at: datetime
 
 
+class PatientAssignmentStats(BaseModel):
+    patient: UserProfile
+    assigned_count: int
+    in_progress_count: int
+    completed_count: int
+    total_count: int
+
+
 class PatientLinkRequest(BaseModel):
-    patient_id: str
+    patient_id: str | None = None
+    patient_email: str | None = None
+    patient_username: str | None = None
 
 
 class AssignmentCreateRequest(BaseModel):
