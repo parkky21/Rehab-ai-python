@@ -106,6 +106,8 @@ class ExerciseBase:
             sway=sway,
             rep_time=rep_time,
         )
+        self.last_rep_scores["rom_value"] = round(rom, 2)
+        self.last_rep_scores["rep_time"] = round(rep_time, 3)
         
         # Score ML models
         lstm, trans = self._get_or_create_ml_scorers()

@@ -5,11 +5,18 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "fastapi>=0.116.0",
+    "motor>=3.7.1",
     "customtkinter>=5.2.2",
+    "passlib[bcrypt]>=1.7.4",
+    "pydantic-settings>=2.11.0",
+    "python-jose[cryptography]>=3.5.0",
     "matplotlib>=3.10.8",
     "mediapipe>=0.10.32",
     "numpy>=2.4.2",
     "opencv-python>=4.13.0.92",
+    "python-multipart>=0.0.20",
     "torch>=2.0",
     "scikit-learn>=1.4",
+    "uvicorn>=0.35.0",
 ]
